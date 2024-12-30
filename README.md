@@ -17,9 +17,7 @@ A node for InvokeAI that uses the Florence 2 model family to generate image desc
 |                | - `MiaoshouAI/Florence-2-large-PromptGen-v1.5`                             |
 
 #### Info:
-- On first use, the required model files will be automatically downloaded and cached in the `models` directory.
-- This node supports CUDA for faster execution when a compatible GPU is available.
-- If the image is not in RGB format, it will be automatically converted.
+- On first use of a model, the required model files will be automatically downloaded and cached in the `models` directory on the node.
 
 #### Notes:
 - The generated captions vary in detail based on the selected `caption_type`.
