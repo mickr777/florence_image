@@ -17,7 +17,7 @@ from typing import Literal
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.3.0",
+    version="0.3.5",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -40,67 +40,84 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
         description="Select the type of model", default="microsoft/Florence-2-base"
     )
 
-    def describe_image(self, image, caption_type):
-        model_name = self.model_type
-        folder_name = model_name.replace("microsoft/", "").replace("/", "-")
-        cache_dir = os.path.join(os.path.dirname(__file__), "models", folder_name)
+    prepend_text: str = InputField(
+        description="Text to prepend to the prompt", default=""
+    )
 
-        os.makedirs(cache_dir, exist_ok=True)
+    append_text: str = InputField(
+        description="Text to append to the prompt", default=""
+    )
 
-        print(f"Loading {model_name} model from cache directory: {cache_dir}")
-        processor = AutoProcessor.from_pretrained(
-            model_name, cache_dir=cache_dir, trust_remote_code=True
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, cache_dir=cache_dir, trust_remote_code=True
-        )
+    def describe_image(self, image, caption_type, prepend_text, append_text):
+        try:
+            model_name = self.model_type
+            folder_name = model_name.replace("microsoft/", "").replace("/", "-")
+            cache_dir = os.path.join(os.path.dirname(__file__), "models", folder_name)
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
+            os.makedirs(cache_dir, exist_ok=True)
 
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+            print(f"Loading {model_name} model from cache directory: {cache_dir}")
+            processor = AutoProcessor.from_pretrained(
+                model_name, cache_dir=cache_dir, trust_remote_code=True
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, cache_dir=cache_dir, trust_remote_code=True
+            )
 
-        if caption_type == "Caption":
-            task_prompt = "<CAPTION>"
-        elif caption_type == "Detailed Caption":
-            task_prompt = "<DETAILED_CAPTION>"
-        else:
-            task_prompt = "<MORE_DETAILED_CAPTION>"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(device)
 
-        inputs = processor(text=task_prompt, images=image, return_tensors="pt").to(
-            device
-        )
-        generated_ids = model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=1024,
-            num_beams=3,
-        )
-        generated_text = processor.batch_decode(
-            generated_ids, skip_special_tokens=True
-        )[0]
+            if image.mode != "RGB":
+                print("Converting image to RGB mode.")
+                image = image.convert("RGB")
 
-        parsed_answer = processor.post_process_generation(
-            generated_text, task=task_prompt, image_size=(image.width, image.height)
-        )
+            task_prompt_map = {
+                "Caption": "<CAPTION>",
+                "Detailed Caption": "<DETAILED_CAPTION>",
+                "More Detailed Caption": "<MORE_DETAILED_CAPTION>",
+            }
+            task_prompt = task_prompt_map[caption_type]
 
-        print(f"Debugging parsed_answer: {parsed_answer}")
+            inputs = processor(text=task_prompt, images=image, return_tensors="pt").to(
+                device
+            )
 
-        caption = (
-            parsed_answer.get(task_prompt, "")
-            if isinstance(parsed_answer, dict)
-            else str(parsed_answer)
-        )
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+            )
+            generated_text = processor.batch_decode(
+                generated_ids, skip_special_tokens=True
+            )[0]
 
-        print(f"Final caption: {caption}")
-        return caption
+            parsed_answer = processor.post_process_generation(
+                generated_text, task=task_prompt, image_size=(image.width, image.height)
+            )
+
+            caption = (
+                parsed_answer.get(task_prompt, "")
+                if isinstance(parsed_answer, dict)
+                else str(parsed_answer)
+            )
+
+            final_caption = f"{prepend_text} {caption} {append_text}".strip()
+
+            return final_caption
+        except Exception as e:
+            raise RuntimeError(f"Error during image description: {str(e)}") from e
 
     def invoke(self, context: InvocationContext) -> StringOutput:
         try:
             pil_image = context.images.get_pil(self.input_image.image_name)
 
-            description = self.describe_image(pil_image, self.caption_type)
+            description = self.describe_image(
+                pil_image,
+                self.caption_type,
+                self.prepend_text,
+                self.append_text,
+            )
             print(f"Generated Description: {description}")
             return StringOutput(value=description)
         except Exception as e:
