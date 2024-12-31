@@ -15,6 +15,8 @@ A node for InvokeAI that uses the Florence 2 model family to generate image desc
 |                | - `gokaygokay/Florence-2-SD3-Captioner`                                    |
 |                | - `MiaoshouAI/Florence-2-base-PromptGen-v1.5`                              |
 |                | - `MiaoshouAI/Florence-2-large-PromptGen-v1.5`                             |
+| prepend_text   | Text to prepend to the prompt                                              |
+| append_text     | Text to append to the prompt                 |
 
 #### Info:
 - On first use of a model, the required model files will be automatically downloaded and cached in the `models` directory on the node.
