@@ -17,7 +17,7 @@ from typing import Literal
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.3.6",
+    version="0.4.0",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
