@@ -1,6 +1,6 @@
 import os
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 from invokeai.invocation_api import (
     BaseInvocation,
     InvocationContext,
@@ -17,7 +17,7 @@ from typing import Literal
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.3.5",
+    version="0.3.6",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -51,7 +51,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
     def describe_image(self, image, caption_type, prepend_text, append_text):
         try:
             model_name = self.model_type
-            folder_name = model_name.replace("microsoft/", "").replace("/", "-")
+            folder_name = model_name.replace("/", "-")
             cache_dir = os.path.join(os.path.dirname(__file__), "models", folder_name)
 
             os.makedirs(cache_dir, exist_ok=True)
@@ -60,12 +60,18 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             processor = AutoProcessor.from_pretrained(
                 model_name, cache_dir=cache_dir, trust_remote_code=True
             )
+
+            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+
             model = AutoModelForCausalLM.from_pretrained(
-                model_name, cache_dir=cache_dir, trust_remote_code=True
+                model_name,
+                cache_dir=cache_dir,
+                trust_remote_code=True,
+                quantization_config=bnb_config,
+                low_cpu_mem_usage=True,
             )
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = model.to(device)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             if image.mode != "RGB":
                 print("Converting image to RGB mode.")
@@ -81,6 +87,9 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             inputs = processor(text=task_prompt, images=image, return_tensors="pt").to(
                 device
             )
+
+            if model.dtype == torch.float16:
+                inputs["pixel_values"] = inputs["pixel_values"].half()
 
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
@@ -105,8 +114,15 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             final_caption = f"{prepend_text} {caption} {append_text}".strip()
 
             return final_caption
+
         except Exception as e:
             raise RuntimeError(f"Error during image description: {str(e)}") from e
+
+        finally:
+            if "model" in locals():
+                del model
+            torch.cuda.empty_cache()
+            print("Model unloaded and memory cleared.")
 
     def invoke(self, context: InvocationContext) -> StringOutput:
         try:
