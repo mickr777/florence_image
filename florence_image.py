@@ -17,7 +17,7 @@ from typing import Literal
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.4.0",
+    version="0.4.1",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -48,15 +48,18 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
         description="Text to append to the prompt", default=""
     )
 
-    def describe_image(self, image, caption_type, prepend_text, append_text):
+    def describe_image(
+        self, context: InvocationContext, image, caption_type, prepend_text, append_text
+    ):
         try:
+            context.util.signal_progress("Preparing to load the model...")
             model_name = self.model_type
             folder_name = model_name.replace("/", "-")
             cache_dir = os.path.join(os.path.dirname(__file__), "models", folder_name)
 
             os.makedirs(cache_dir, exist_ok=True)
 
-            print(f"Loading {model_name} model from cache directory: {cache_dir}")
+            context.util.signal_progress(f"Loading {model_name} model from cache")
             processor = AutoProcessor.from_pretrained(
                 model_name, cache_dir=cache_dir, trust_remote_code=True
             )
@@ -74,7 +77,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             if image.mode != "RGB":
-                print("Converting image to RGB mode.")
+                context.util.signal_progress("Converting image to RGB mode.")
                 image = image.convert("RGB")
 
             task_prompt_map = {
@@ -91,6 +94,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             if model.dtype == torch.float16:
                 inputs["pixel_values"] = inputs["pixel_values"].half()
 
+            context.util.signal_progress("Generating caption...")
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
@@ -112,7 +116,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             )
 
             final_caption = f"{prepend_text} {caption} {append_text}".strip()
-
+            context.util.signal_progress("Caption generation complete.")
             return final_caption
 
         except Exception as e:
@@ -129,6 +133,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             pil_image = context.images.get_pil(self.input_image.image_name)
 
             description = self.describe_image(
+                context,
                 pil_image,
                 self.caption_type,
                 self.prepend_text,
@@ -137,4 +142,5 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             print(f"Generated Description: {description}")
             return StringOutput(value=description)
         except Exception as e:
+            context.util.signal_progress(f"Error occurred: {str(e)}")
             return StringOutput(value=f"Error: {str(e)}")
