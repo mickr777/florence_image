@@ -1,6 +1,8 @@
 import os
+os.environ.setdefault("TRANSFORMERS_ATTENTION_IMPLEMENTATION", "eager")
 import torch
 from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
+from transformers.generation.configuration_utils import GenerationConfig
 from invokeai.invocation_api import (
     BaseInvocation,
     InvocationContext,
@@ -11,13 +13,12 @@ from invokeai.invocation_api import (
 )
 from typing import Literal
 
-
 @invocation(
     "Image_Description_Florence2",
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.4.1",
+    version="0.4.3",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -72,6 +73,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
                 trust_remote_code=True,
                 quantization_config=bnb_config,
                 low_cpu_mem_usage=True,
+                attn_implementation="eager",
             )
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,6 +102,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
                 num_beams=3,
+                use_cache=False,
             )
             generated_text = processor.batch_decode(
                 generated_ids, skip_special_tokens=True
