@@ -1,8 +1,8 @@
 import os
 os.environ.setdefault("TRANSFORMERS_ATTENTION_IMPLEMENTATION", "eager")
+
 import torch
 from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
-from transformers.generation.configuration_utils import GenerationConfig
 from invokeai.invocation_api import (
     BaseInvocation,
     InvocationContext,
@@ -18,7 +18,7 @@ from typing import Literal
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.4.3",
+    version="0.4.4",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -33,21 +33,16 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
     model_type: Literal[
         "microsoft/Florence-2-base",
         "microsoft/Florence-2-large",
-        "gokaygokay/Florence-2-Flux-Large",
-        "gokaygokay/Florence-2-SD3-Captioner",
-        "MiaoshouAI/Florence-2-base-PromptGen-v1.5",
-        "MiaoshouAI/Florence-2-large-PromptGen-v1.5",
+        #"gokaygokay/Florence-2-Flux-Large",
+        #"gokaygokay/Florence-2-SD3-Captioner",
+        #"MiaoshouAI/Florence-2-base-PromptGen-v1.5",
+        #"MiaoshouAI/Florence-2-large-PromptGen-v1.5",
     ] = InputField(
         description="Select the type of model", default="microsoft/Florence-2-base"
     )
 
-    prepend_text: str = InputField(
-        description="Text to prepend to the prompt", default=""
-    )
-
-    append_text: str = InputField(
-        description="Text to append to the prompt", default=""
-    )
+    prepend_text: str = InputField(description="Text to prepend to the prompt", default="")
+    append_text: str = InputField(description="Text to append to the prompt", default="")
 
     def describe_image(
         self, context: InvocationContext, image, caption_type, prepend_text, append_text
@@ -57,7 +52,6 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             model_name = self.model_type
             folder_name = model_name.replace("/", "-")
             cache_dir = os.path.join(os.path.dirname(__file__), "models", folder_name)
-
             os.makedirs(cache_dir, exist_ok=True)
 
             context.util.signal_progress(f"Loading {model_name} model from cache")
@@ -65,18 +59,31 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
                 model_name, cache_dir=cache_dir, trust_remote_code=True
             )
 
-            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+            use_cuda = torch.cuda.is_available()
+            use_mps = torch.backends.mps.is_available()
 
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                cache_dir=cache_dir,
-                trust_remote_code=True,
-                quantization_config=bnb_config,
-                low_cpu_mem_usage=True,
-                attn_implementation="eager",
-            )
+            if use_cuda:
+                device = torch.device("cuda:0")
+                bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    cache_dir=cache_dir,
+                    trust_remote_code=True,
+                    quantization_config=bnb_config,
+                    low_cpu_mem_usage=True,
+                    attn_implementation="eager",
+                    device_map={"": 0},
+                )
+            else:
+                device = torch.device("mps" if use_mps else "cpu")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    cache_dir=cache_dir,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    attn_implementation="eager",
+                ).to(device)
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             if image.mode != "RGB":
                 context.util.signal_progress("Converting image to RGB mode.")
@@ -89,24 +96,21 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             }
             task_prompt = task_prompt_map[caption_type]
 
-            inputs = processor(text=task_prompt, images=image, return_tensors="pt").to(
-                device
-            )
+            inputs = processor(text=task_prompt, images=image, return_tensors="pt")
+            inputs = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in inputs.items()}
 
-            if model.dtype == torch.float16:
+            if device.type == "cuda" and getattr(model, "dtype", None) == torch.float16 and "pixel_values" in inputs:
                 inputs["pixel_values"] = inputs["pixel_values"].half()
 
             context.util.signal_progress("Generating caption...")
             generated_ids = model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                **inputs,
                 max_new_tokens=1024,
                 num_beams=3,
                 use_cache=False,
             )
-            generated_text = processor.batch_decode(
-                generated_ids, skip_special_tokens=True
-            )[0]
+
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
             parsed_answer = processor.post_process_generation(
                 generated_text, task=task_prompt, image_size=(image.width, image.height)
@@ -126,9 +130,12 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             raise RuntimeError(f"Error during image description: {str(e)}") from e
 
         finally:
-            if "model" in locals():
+            try:
                 del model
-            torch.cuda.empty_cache()
+            except Exception:
+                pass
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             print("Model unloaded and memory cleared.")
 
     def invoke(self, context: InvocationContext) -> StringOutput:
