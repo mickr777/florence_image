@@ -13,8 +13,8 @@ A node for InvokeAI that uses the Florence 2 model family to generate image desc
 |                | - `microsoft/Florence-2-large`                                             |
 |                | - `gokaygokay/Florence-2-Flux-Large`                                       |
 |                | - `gokaygokay/Florence-2-SD3-Captioner`                                    |
-|                | - `MiaoshouAI/Florence-2-base-PromptGen-v1.5`                              |
-|                | - `MiaoshouAI/Florence-2-large-PromptGen-v1.5`                             |
+|                | - `MiaoshouAI/Florence-2-base-PromptGen-v2.0`                              |
+|                | - `MiaoshouAI/Florence-2-large-PromptGen-v2.0`                             |
 | prepend_text   | Text to prepend to the prompt                                              |
 | append_text     | Text to append to the prompt                 |
 
