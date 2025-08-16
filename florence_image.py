@@ -60,7 +60,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.4.8",
+    version="0.4.9",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -143,6 +143,9 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
 
             inputs = processor(text=task_prompt, images=image, return_tensors="pt")
             inputs = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in inputs.items()}
+
+            if self.model_type.startswith("MiaoshouAI/Florence-2-large-PromptGen-v2.0"):
+                inputs.pop("attention_mask", None)
 
             if device.type == "cuda" and getattr(model, "dtype", None) == torch.float16 and "pixel_values" in inputs:
                 inputs["pixel_values"] = inputs["pixel_values"].half()
