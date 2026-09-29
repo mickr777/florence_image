@@ -8,7 +8,6 @@ from typing import Literal
 
 import torch
 from PIL import Image as PILImage
-from tokenizers import AddedToken
 from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
@@ -16,7 +15,6 @@ from transformers import (
     BitsAndBytesConfig,
     CLIPImageProcessor,
     PreTrainedModel,
-    PreTrainedTokenizerBase,
 )
 from transformers import __version__ as HF_VERSION
 from transformers.configuration_utils import PreTrainedConfig
@@ -76,27 +74,6 @@ def _legacy_florence_config_compat():
         yield
     finally:
         PreTrainedConfig.__post_init__ = original_post_init
-
-
-@contextmanager
-def _legacy_florence_tokenizer_compat():
-    """Allow legacy Florence processors to pass one token to add_tokens on Transformers 5.x."""
-    if not _uses_transformers_v5():
-        yield
-        return
-
-    original_add_tokens = PreTrainedTokenizerBase.add_tokens
-
-    def compat_add_tokens(tokenizer, new_tokens, *args, **kwargs):
-        if isinstance(new_tokens, (str, AddedToken)):
-            new_tokens = [new_tokens]
-        return original_add_tokens(tokenizer, new_tokens, *args, **kwargs)
-
-    PreTrainedTokenizerBase.add_tokens = compat_add_tokens
-    try:
-        yield
-    finally:
-        PreTrainedTokenizerBase.add_tokens = original_add_tokens
 
 
 @contextmanager
@@ -257,37 +234,14 @@ def _load_florence_processor(model_name: str, cache_dir: str):
         return AutoProcessor.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
 
     image_processor = CLIPImageProcessor.from_pretrained(model_name, cache_dir=cache_dir)
+    tokenizer = _load_florence_tokenizer_v5(model_name, cache_dir)
 
-    with _legacy_florence_tokenizer_compat():
-        tokenizer = BartTokenizerFast.from_pretrained(model_name, cache_dir=cache_dir)
-
-        # Transformers 5 renamed/reshaped some special-token APIs. Normalize the
-        # legacy Florence view to a plain List[str | AddedToken] before the remote
-        # processor appends its task/location tokens.
-        additional = getattr(tokenizer, "additional_special_tokens", None)
-        if not isinstance(additional, (list, tuple)) or not additional:
-            extra = getattr(tokenizer, "extra_special_tokens", None)
-            if isinstance(extra, dict):
-                additional = list(extra.values())
-            elif isinstance(extra, (list, tuple, set)):
-                additional = list(extra)
-            else:
-                additional = tokenizer.special_tokens_map.get("additional_special_tokens", [])
-
-        normalized_additional = []
-        for token in list(additional or []):
-            if isinstance(token, (str, AddedToken)):
-                normalized_additional.append(token)
-            elif isinstance(token, dict) and isinstance(token.get("content"), str):
-                normalized_additional.append(token["content"])
-        tokenizer.additional_special_tokens = normalized_additional
-
-        processor_cls = get_class_from_dynamic_module(
-            "processing_florence2.Florence2Processor",
-            model_name,
-            cache_dir=cache_dir,
-        )
-        return processor_cls(image_processor=image_processor, tokenizer=tokenizer)
+    processor_cls = get_class_from_dynamic_module(
+        "processing_florence2.Florence2Processor",
+        model_name,
+        cache_dir=cache_dir,
+    )
+    return processor_cls(image_processor=image_processor, tokenizer=tokenizer)
 
 
 def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, use_cuda: bool):
@@ -412,7 +366,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.5.1",
+    version="0.5.2",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
