@@ -186,6 +186,23 @@ def _patch_remote_florence_model(model_cls) -> None:
             "language_model.lm_head.weight": "language_model.model.shared.weight",
         },
     }
+
+    # Older Florence forks rebuild the top-level tied-weight metadata inside
+    # __init__ as a list immediately before calling self.post_init(). That
+    # overwrites the class-level mapping above. Transformers 5 expects a dict
+    # and calls .keys()/.values() on it, so normalize it at the last possible
+    # point before the Transformers post-init machinery runs.
+    original_top_post_init = getattr(model_cls, "post_init", None)
+    if callable(original_top_post_init) and not getattr(
+        original_top_post_init, "_invokeai_florence_tied_guard", False
+    ):
+        def compat_top_post_init(self):
+            if isinstance(getattr(self, "_tied_weights_keys", None), (list, tuple)):
+                self._tied_weights_keys = tied_weight_maps["Florence2ForConditionalGeneration"].copy()
+            return original_top_post_init(self)
+
+        compat_top_post_init._invokeai_florence_tied_guard = True
+        model_cls.post_init = compat_top_post_init
     for class_name, mapping in tied_weight_maps.items():
         cls = getattr(module, class_name, None)
         if cls is not None and isinstance(getattr(cls, "_tied_weights_keys", None), (list, tuple)):
@@ -366,7 +383,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.5.2",
+    version="0.5.3",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
