@@ -22,6 +22,7 @@ from transformers import __version__ as HF_VERSION
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.generation import GenerationConfig, GenerationMixin
+from transformers.utils.hub import cached_file
 
 from invokeai.invocation_api import (
     BaseInvocation,
@@ -225,6 +226,32 @@ def _patch_remote_florence_model(model_cls) -> None:
             cls._supports_flash_attn_2 = False
 
 
+def _load_florence_tokenizer_v5(model_name: str, cache_dir: str):
+    """Load Florence's BART tokenizer without parsing legacy special-token metadata."""
+    tokenizer_file = cached_file(model_name, "tokenizer.json", cache_dir=cache_dir)
+    if tokenizer_file is None:
+        raise RuntimeError(f"{model_name} does not provide tokenizer.json")
+
+    # Some Florence fine-tunes (notably gokaygokay) ship a legacy
+    # special_tokens_map.json whose additional_special_tokens are dictionaries.
+    # Transformers 5 rejects that format. Loading tokenizer.json directly keeps
+    # the trained vocabulary/merges/added-token IDs while avoiding the obsolete
+    # metadata file; Florence2Processor registers the required special tokens.
+    tokenizer = BartTokenizerFast(
+        tokenizer_file=tokenizer_file,
+        model_max_length=1024,
+        bos_token="<s>",
+        eos_token="</s>",
+        unk_token="<unk>",
+        sep_token="</s>",
+        pad_token="<pad>",
+        cls_token="<s>",
+        mask_token="<mask>",
+    )
+    tokenizer.additional_special_tokens = []
+    return tokenizer
+
+
 def _load_florence_processor(model_name: str, cache_dir: str):
     if not _uses_transformers_v5():
         return AutoProcessor.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
@@ -402,6 +429,8 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
         "microsoft/Florence-2-large",
         "gokaygokay/Florence-2-Flux-Large",
         "gokaygokay/Florence-2-SD3-Captioner",
+        "MiaoshouAI/Florence-2-base-PromptGen-v1.5",
+        "MiaoshouAI/Florence-2-large-PromptGen-v1.5",
         "MiaoshouAI/Florence-2-base-PromptGen-v2.0",
         "MiaoshouAI/Florence-2-large-PromptGen-v2.0",
     ] = InputField(
@@ -450,7 +479,7 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             )
             inputs = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in inputs.items()}
 
-            if self.model_type.startswith("MiaoshouAI/Florence-2-large-PromptGen-v2.0"):
+            if self.model_type.startswith("MiaoshouAI/Florence-2-large-PromptGen"):
                 inputs.pop("attention_mask", None)
 
             if device.type == "cuda" and getattr(model, "dtype", None) == torch.float16 and "pixel_values" in inputs:
