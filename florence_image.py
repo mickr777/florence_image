@@ -5,6 +5,7 @@ import importlib.util
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 import threading
 from contextlib import contextmanager
 from typing import Literal
@@ -50,10 +51,12 @@ def _ensure_timm_available() -> None:
         if importlib.util.find_spec("timm") is not None:
             return
 
-        uv_exe = shutil.which("uv")
+        uv_name = "uv.exe" if os.name == "nt" else "uv"
+        venv_uv = Path(sys.executable).with_name(uv_name)
+        uv_exe = str(venv_uv) if venv_uv.is_file() else shutil.which("uv")
         if uv_exe is None:
             raise RuntimeError(
-                "Florence requires the 'timm' package, but 'uv' was not found on PATH. "
+                "Florence requires the 'timm' package, but uv could not be found in the InvokeAI environment or PATH. "
                 f"Install it manually with: uv pip install --python \"{sys.executable}\" timm"
             )
 
