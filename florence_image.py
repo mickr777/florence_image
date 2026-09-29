@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("TRANSFORMERS_ATTENTION_IMPLEMENTATION", "eager")
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 import threading
@@ -49,15 +50,22 @@ def _ensure_timm_available() -> None:
         if importlib.util.find_spec("timm") is not None:
             return
 
+        uv_exe = shutil.which("uv")
+        if uv_exe is None:
+            raise RuntimeError(
+                "Florence requires the 'timm' package, but 'uv' was not found on PATH. "
+                f"Install it manually with: uv pip install --python \"{sys.executable}\" timm"
+            )
+
         try:
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "timm"],
+                [uv_exe, "pip", "install", "--python", sys.executable, "timm"],
                 check=True,
             )
         except Exception as exc:
             raise RuntimeError(
                 "Florence requires the 'timm' package, but automatic installation failed. "
-                f"Install it manually with: {sys.executable} -m pip install timm"
+                f"Install it manually with: uv pip install --python \"{sys.executable}\" timm"
             ) from exc
 
         importlib.invalidate_caches()
