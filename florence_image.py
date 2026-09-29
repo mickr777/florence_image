@@ -3,6 +3,7 @@ os.environ.setdefault("TRANSFORMERS_ATTENTION_IMPLEMENTATION", "eager")
 
 import sys
 import threading
+import warnings
 from contextlib import contextmanager
 from typing import Literal
 
@@ -261,6 +262,31 @@ def _load_florence_processor(model_name: str, cache_dir: str):
     return processor_cls(image_processor=image_processor, tokenizer=tokenizer)
 
 
+def _ensure_generation_mixin_classes(model_cls):
+    """Make legacy Florence generation classes explicit GenerationMixin subclasses on Transformers 5."""
+    if not _uses_transformers_v5():
+        return model_cls
+
+    module = sys.modules.get(model_cls.__module__)
+    if module is None:
+        return model_cls
+
+    for class_name in ("Florence2LanguageForConditionalGeneration", "Florence2ForConditionalGeneration"):
+        cls = getattr(module, class_name, None)
+        if cls is None or issubclass(cls, GenerationMixin):
+            continue
+        patched = type(
+            cls.__name__,
+            (cls, GenerationMixin),
+            {"__module__": cls.__module__},
+        )
+        setattr(module, class_name, patched)
+        if cls is model_cls:
+            model_cls = patched
+
+    return model_cls
+
+
 def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, use_cuda: bool):
     if not _uses_transformers_v5():
         if use_cuda:
@@ -289,6 +315,7 @@ def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, 
             cache_dir=cache_dir,
         )
         _patch_remote_florence_model(model_cls)
+        model_cls = _ensure_generation_mixin_classes(model_cls)
 
         load_kwargs = {
             "cache_dir": cache_dir,
@@ -303,6 +330,18 @@ def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, 
             _legacy_florence_model_base_compat(),
             _legacy_florence_torch_compat(model_cls),
         ):
+            # The fine-tune checkpoints contain distinct shared/lm_head weights.
+            # Transformers already refuses to tie them, so declaring them untied
+            # matches the checkpoint and avoids a noisy warning without changing
+            # the loaded parameter values. Keep Microsoft's native config intact.
+            if not model_name.startswith("microsoft/"):
+                config = model_cls.config_class.from_pretrained(model_name, cache_dir=cache_dir)
+                config.tie_word_embeddings = False
+                text_config = getattr(config, "text_config", None)
+                if text_config is not None:
+                    text_config.tie_word_embeddings = False
+                load_kwargs["config"] = config
+
             model = model_cls.from_pretrained(model_name, **load_kwargs)
 
     if not use_cuda:
@@ -369,6 +408,15 @@ def _patch_model_for_generation(model, processor) -> None:
                 gen_cfg.eos_token_id = tok.eos_token_id
             if getattr(gen_cfg, "pad_token_id", None) is None and getattr(tok, "pad_token_id", None) is not None:
                 gen_cfg.pad_token_id = tok.pad_token_id
+    if _uses_transformers_v5():
+        # Pass generation settings only through GenerationConfig. Transformers 5
+        # warns when the same settings are also supplied as generate() kwargs.
+        gen_cfg.max_length = None
+        gen_cfg.max_new_tokens = 1024
+        gen_cfg.num_beams = 3
+        gen_cfg.do_sample = False
+        gen_cfg.use_cache = False
+
     model.generation_config = gen_cfg
     for name in ("language_model", "text_model", "model", "lm"):
         sub = getattr(model, name, None)
@@ -383,7 +431,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.5.3",
+    version="0.5.4",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -461,31 +509,44 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             eos_id = getattr(gen_cfg, "eos_token_id", None) if gen_cfg else None
             pad_id = getattr(gen_cfg, "pad_token_id", None) if gen_cfg else None
 
-            try:
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    num_beams=3,
-                    do_sample=False,
-                    use_cache=False,
-                    eos_token_id=eos_id,
-                    pad_token_id=pad_id,
-                    generation_config=gen_cfg,
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"The attention mask API under .*modeling_attn_mask_utils.* is deprecated.*",
+                    category=FutureWarning,
                 )
-            except AttributeError:
-                lm = getattr(model, "language_model", None)
-                if lm is None or not callable(getattr(lm, "generate", None)):
-                    raise
-                generated_ids = lm.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    num_beams=3,
-                    do_sample=False,
-                    use_cache=False,
-                    eos_token_id=eos_id,
-                    pad_token_id=pad_id,
-                    generation_config=getattr(lm, "generation_config", gen_cfg),
-                )
+                try:
+                    if _uses_transformers_v5():
+                        generated_ids = model.generate(**inputs, generation_config=gen_cfg)
+                    else:
+                        generated_ids = model.generate(
+                            **inputs,
+                            max_new_tokens=1024,
+                            num_beams=3,
+                            do_sample=False,
+                            use_cache=False,
+                            eos_token_id=eos_id,
+                            pad_token_id=pad_id,
+                            generation_config=gen_cfg,
+                        )
+                except AttributeError:
+                    lm = getattr(model, "language_model", None)
+                    if lm is None or not callable(getattr(lm, "generate", None)):
+                        raise
+                    lm_gen_cfg = getattr(lm, "generation_config", gen_cfg)
+                    if _uses_transformers_v5():
+                        generated_ids = lm.generate(**inputs, generation_config=lm_gen_cfg)
+                    else:
+                        generated_ids = lm.generate(
+                            **inputs,
+                            max_new_tokens=1024,
+                            num_beams=3,
+                            do_sample=False,
+                            use_cache=False,
+                            eos_token_id=eos_id,
+                            pad_token_id=pad_id,
+                            generation_config=lm_gen_cfg,
+                        )
 
             generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
