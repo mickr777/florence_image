@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 from PIL import Image as PILImage
+from tokenizers import AddedToken
 from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
@@ -15,6 +16,7 @@ from transformers import (
     BitsAndBytesConfig,
     CLIPImageProcessor,
     PreTrainedModel,
+    PreTrainedTokenizerBase,
 )
 from transformers import __version__ as HF_VERSION
 from transformers.configuration_utils import PreTrainedConfig
@@ -73,6 +75,27 @@ def _legacy_florence_config_compat():
         yield
     finally:
         PreTrainedConfig.__post_init__ = original_post_init
+
+
+@contextmanager
+def _legacy_florence_tokenizer_compat():
+    """Allow legacy Florence processors to pass one token to add_tokens on Transformers 5.x."""
+    if not _uses_transformers_v5():
+        yield
+        return
+
+    original_add_tokens = PreTrainedTokenizerBase.add_tokens
+
+    def compat_add_tokens(tokenizer, new_tokens, *args, **kwargs):
+        if isinstance(new_tokens, (str, AddedToken)):
+            new_tokens = [new_tokens]
+        return original_add_tokens(tokenizer, new_tokens, *args, **kwargs)
+
+    PreTrainedTokenizerBase.add_tokens = compat_add_tokens
+    try:
+        yield
+    finally:
+        PreTrainedTokenizerBase.add_tokens = original_add_tokens
 
 
 @contextmanager
@@ -190,11 +213,16 @@ def _patch_remote_florence_model(model_cls) -> None:
         if cls is not None and isinstance(getattr(cls, "_tied_weights_keys", None), (list, tuple)):
             cls._tied_weights_keys = mapping
 
+    # Transformers 5 treats these as writable class capabilities. Several older
+    # Florence forks expose them as read-only @property methods instead, which
+    # causes "property ... has no setter" during model initialization. Shadow the
+    # legacy properties directly on both the base and concrete class. We force
+    # eager attention below, so advertising SDPA/Flash support is unnecessary.
     top_base = getattr(module, "Florence2PreTrainedModel", None)
-    if top_base is not None:
-        for attr_name in ("_supports_sdpa", "_supports_flash_attn_2"):
-            if isinstance(top_base.__dict__.get(attr_name), property):
-                setattr(top_base, attr_name, False)
+    for cls in (top_base, model_cls):
+        if cls is not None:
+            cls._supports_sdpa = False
+            cls._supports_flash_attn_2 = False
 
 
 def _load_florence_processor(model_name: str, cache_dir: str):
@@ -202,20 +230,37 @@ def _load_florence_processor(model_name: str, cache_dir: str):
         return AutoProcessor.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
 
     image_processor = CLIPImageProcessor.from_pretrained(model_name, cache_dir=cache_dir)
-    tokenizer = BartTokenizerFast.from_pretrained(model_name, cache_dir=cache_dir)
 
-    # Old Florence processors read this as a direct tokenizer attribute. Some
-    # Transformers 5 tokenizers only expose it through special_tokens_map.
-    if not hasattr(tokenizer, "additional_special_tokens"):
-        additional = tokenizer.special_tokens_map.get("additional_special_tokens", [])
-        tokenizer.additional_special_tokens = list(additional or [])
+    with _legacy_florence_tokenizer_compat():
+        tokenizer = BartTokenizerFast.from_pretrained(model_name, cache_dir=cache_dir)
 
-    processor_cls = get_class_from_dynamic_module(
-        "processing_florence2.Florence2Processor",
-        model_name,
-        cache_dir=cache_dir,
-    )
-    return processor_cls(image_processor=image_processor, tokenizer=tokenizer)
+        # Transformers 5 renamed/reshaped some special-token APIs. Normalize the
+        # legacy Florence view to a plain List[str | AddedToken] before the remote
+        # processor appends its task/location tokens.
+        additional = getattr(tokenizer, "additional_special_tokens", None)
+        if not isinstance(additional, (list, tuple)) or not additional:
+            extra = getattr(tokenizer, "extra_special_tokens", None)
+            if isinstance(extra, dict):
+                additional = list(extra.values())
+            elif isinstance(extra, (list, tuple, set)):
+                additional = list(extra)
+            else:
+                additional = tokenizer.special_tokens_map.get("additional_special_tokens", [])
+
+        normalized_additional = []
+        for token in list(additional or []):
+            if isinstance(token, (str, AddedToken)):
+                normalized_additional.append(token)
+            elif isinstance(token, dict) and isinstance(token.get("content"), str):
+                normalized_additional.append(token["content"])
+        tokenizer.additional_special_tokens = normalized_additional
+
+        processor_cls = get_class_from_dynamic_module(
+            "processing_florence2.Florence2Processor",
+            model_name,
+            cache_dir=cache_dir,
+        )
+        return processor_cls(image_processor=image_processor, tokenizer=tokenizer)
 
 
 def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, use_cuda: bool):
@@ -340,7 +385,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.5.0",
+    version="0.5.1",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
@@ -383,9 +428,6 @@ class FlorenceImageCaptionInvocation(BaseInvocation):
             use_mps = torch.backends.mps.is_available()
             device = torch.device("cuda:0" if use_cuda else ("mps" if use_mps else "cpu"))
             model = _load_florence_model(model_name, cache_dir, device, use_cuda)
-
-            if not hasattr(model, "_supports_sdpa"):
-                model._supports_sdpa = False
 
             _patch_model_for_generation(model, processor)
 
