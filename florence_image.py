@@ -1,6 +1,8 @@
 import os
 os.environ.setdefault("TRANSFORMERS_ATTENTION_IMPLEMENTATION", "eager")
 
+import importlib.util
+import subprocess
 import sys
 import threading
 from contextlib import contextmanager
@@ -34,6 +36,36 @@ from invokeai.invocation_api import (
 
 _TRANSFORMERS_MAJOR = int(HF_VERSION.split(".", 1)[0])
 _FLORENCE_LOAD_LOCK = threading.RLock()
+_TIMM_INSTALL_LOCK = threading.Lock()
+
+
+def _ensure_timm_available() -> None:
+    """Install timm into InvokeAI's active Python environment if it is missing."""
+    if importlib.util.find_spec("timm") is not None:
+        return
+
+    with _TIMM_INSTALL_LOCK:
+        # Another invocation may have installed it while we were waiting.
+        if importlib.util.find_spec("timm") is not None:
+            return
+
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "timm"],
+                check=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Florence requires the 'timm' package, but automatic installation failed. "
+                f"Install it manually with: {sys.executable} -m pip install timm"
+            ) from exc
+
+        importlib.invalidate_caches()
+        if importlib.util.find_spec("timm") is None:
+            raise RuntimeError(
+                "The 'timm' install command completed, but Python still cannot import it. "
+                "Restart InvokeAI and try again."
+            )
 
 
 def _uses_transformers_v5() -> bool:
@@ -262,6 +294,7 @@ def _load_florence_processor(model_name: str, cache_dir: str):
 
 
 def _load_florence_model(model_name: str, cache_dir: str, device: torch.device, use_cuda: bool):
+    _ensure_timm_available()
     if not _uses_transformers_v5():
         if use_cuda:
             bnb_config = BitsAndBytesConfig(load_in_8bit=True)
@@ -383,7 +416,7 @@ def _patch_model_for_generation(model, processor) -> None:
     title="Image Description Using Florence 2",
     tags=["image", "caption", "florence2"],
     category="vision",
-    version="0.5.3",
+    version="0.5.4",
     use_cache=False,
 )
 class FlorenceImageCaptionInvocation(BaseInvocation):
